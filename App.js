@@ -69,7 +69,15 @@ const SuperCoolTodoApp = () => {
       
       // Set up real-time listener for tasks
       const unsubscribe = FirebaseService.subscribeToTasks((tasksFromFirestore) => {
-        setTasks(tasksFromFirestore);
+        // Only update if tasks are different to avoid overriding local state
+        setTasks(prevTasks => {
+          const tasksChanged = JSON.stringify(prevTasks) !== JSON.stringify(tasksFromFirestore);
+          if (tasksChanged) {
+            console.log('Tasks updated from server:', tasksFromFirestore.length);
+            return tasksFromFirestore;
+          }
+          return prevTasks;
+        });
         setIsOnline(FirebaseService.getOnlineStatus());
         setLoading(false);
       });
@@ -168,11 +176,29 @@ const SuperCoolTodoApp = () => {
     try {
       const task = tasks.find(task => task.id === id);
       if (task) {
+        console.log('Toggling task:', id, 'current status:', task.completed);
         await FirebaseService.toggleTask(id, task.completed);
+        
+        // Update online status
+        setIsOnline(FirebaseService.getOnlineStatus());
+        
+        // Update local state immediately for better UX
+        setTasks(prevTasks => 
+          prevTasks.map(t => 
+            t.id === id ? { ...t, completed: !t.completed } : t
+          )
+        );
       }
     } catch (error) {
       console.error('Error toggling task:', error);
-      Alert.alert('Error', 'Failed to update task');
+      setIsOnline(FirebaseService.getOnlineStatus());
+      
+      // Still update local state even if online update failed
+      setTasks(prevTasks => 
+        prevTasks.map(t => 
+          t.id === id ? { ...t, completed: !t.completed } : t
+        )
+      );
     }
   };
 
@@ -191,10 +217,21 @@ const SuperCoolTodoApp = () => {
             style: 'destructive',
             onPress: async () => {
               try {
+                console.log('Deleting task:', id);
                 await FirebaseService.deleteTask(id);
+                
+                // Update online status
+                setIsOnline(FirebaseService.getOnlineStatus());
+                
+                // Update local state immediately
+                setTasks(prevTasks => prevTasks.filter(t => t.id !== id));
+                
               } catch (error) {
                 console.error('Error deleting task:', error);
-                Alert.alert('Error', 'Failed to delete task');
+                setIsOnline(FirebaseService.getOnlineStatus());
+                
+                // Still update local state even if online delete failed
+                setTasks(prevTasks => prevTasks.filter(t => t.id !== id));
               }
             },
           },
@@ -207,10 +244,29 @@ const SuperCoolTodoApp = () => {
 
   const setPriority = async (id, priority) => {
     try {
+      console.log('Setting priority:', id, priority);
       await FirebaseService.setPriority(id, priority);
+      
+      // Update online status
+      setIsOnline(FirebaseService.getOnlineStatus());
+      
+      // Update local state immediately
+      setTasks(prevTasks => 
+        prevTasks.map(t => 
+          t.id === id ? { ...t, priority: priority } : t
+        )
+      );
+      
     } catch (error) {
       console.error('Error setting priority:', error);
-      Alert.alert('Error', 'Failed to set priority');
+      setIsOnline(FirebaseService.getOnlineStatus());
+      
+      // Still update local state even if online update failed
+      setTasks(prevTasks => 
+        prevTasks.map(t => 
+          t.id === id ? { ...t, priority: priority } : t
+        )
+      );
     }
   };
 
