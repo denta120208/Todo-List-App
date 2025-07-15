@@ -12,11 +12,6 @@ import {
   orderBy,
   serverTimestamp 
 } from "firebase/firestore";
-import { 
-  getAuth, 
-  signInAnonymously, 
-  onAuthStateChanged 
-} from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: "AIzaSyB9nip4NmKdSUFA23ajtoGOZCOIsDzLLJ8",
@@ -32,84 +27,25 @@ const firebaseConfig = {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
-const auth = getAuth(app);
 
 class FirebaseService {
   // Collection name
-  static COLLECTION_NAME = 'users';
-  
-  // Current user ID
-  static currentUserId = null;
-  
-  // Initialize authentication
-  static async initAuth() {
-    try {
-      console.log('Starting authentication...');
-      
-      // Check if user is already signed in
-      if (auth.currentUser) {
-        this.currentUserId = auth.currentUser.uid;
-        console.log('User already authenticated:', this.currentUserId);
-        return this.currentUserId;
-      }
-      
-      // Sign in anonymously
-      console.log('Signing in anonymously...');
-      const result = await signInAnonymously(auth);
-      this.currentUserId = result.user.uid;
-      console.log('Anonymous user created:', this.currentUserId);
-      
-      return this.currentUserId;
-    } catch (error) {
-      console.error('Auth error:', error);
-      throw error;
-    }
-  }
-  
-  // Get user-specific collection reference
-  static getUserCollection() {
-    if (!this.currentUserId) {
-      throw new Error('User not authenticated');
-    }
-    return collection(db, this.COLLECTION_NAME, this.currentUserId, 'todos');
-  }
+  static COLLECTION_NAME = 'todos';
 
   // Add a new task
   static async addTask(task) {
     try {
-      // Ensure user is authenticated
-      if (!this.currentUserId) {
-        console.log('User not authenticated, re-initializing...');
-        await this.initAuth();
-      }
-      
       const taskWithTimestamp = {
         ...task,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       };
       
-      console.log('Adding task for user:', this.currentUserId);
-      const docRef = await addDoc(this.getUserCollection(), taskWithTimestamp);
+      const docRef = await addDoc(collection(db, this.COLLECTION_NAME), taskWithTimestamp);
       console.log('Task added with ID: ', docRef.id);
       return docRef.id;
     } catch (error) {
       console.error('Error adding task: ', error);
-      
-      // Retry once if authentication failed
-      if (error.code === 'permission-denied' || error.code === 'unauthenticated') {
-        console.log('Authentication error, retrying...');
-        try {
-          await this.initAuth();
-          const docRef = await addDoc(this.getUserCollection(), taskWithTimestamp);
-          console.log('Task added with ID after retry: ', docRef.id);
-          return docRef.id;
-        } catch (retryError) {
-          console.error('Retry failed:', retryError);
-          throw retryError;
-        }
-      }
-      
       throw error;
     }
   }
@@ -117,7 +53,7 @@ class FirebaseService {
   // Get all tasks
   static async getTasks() {
     try {
-      const q = query(this.getUserCollection(), orderBy('createdAt', 'desc'));
+      const q = query(collection(db, this.COLLECTION_NAME), orderBy('createdAt', 'desc'));
       const querySnapshot = await getDocs(q);
       const tasks = [];
       
@@ -138,7 +74,7 @@ class FirebaseService {
   // Toggle task completion
   static async toggleTask(taskId, currentStatus) {
     try {
-      const taskRef = doc(this.getUserCollection(), taskId);
+      const taskRef = doc(db, this.COLLECTION_NAME, taskId);
       await updateDoc(taskRef, {
         completed: !currentStatus,
         updatedAt: serverTimestamp()
@@ -153,7 +89,7 @@ class FirebaseService {
   // Delete a task
   static async deleteTask(taskId) {
     try {
-      await deleteDoc(doc(this.getUserCollection(), taskId));
+      await deleteDoc(doc(db, this.COLLECTION_NAME, taskId));
       console.log('Task deleted: ', taskId);
     } catch (error) {
       console.error('Error deleting task: ', error);
@@ -164,7 +100,7 @@ class FirebaseService {
   // Set task priority
   static async setPriority(taskId, priority) {
     try {
-      const taskRef = doc(this.getUserCollection(), taskId);
+      const taskRef = doc(db, this.COLLECTION_NAME, taskId);
       await updateDoc(taskRef, {
         priority: priority,
         updatedAt: serverTimestamp()
@@ -179,7 +115,7 @@ class FirebaseService {
   // Subscribe to real-time task updates
   static subscribeToTasks(callback) {
     try {
-      const q = query(this.getUserCollection(), orderBy('createdAt', 'desc'));
+      const q = query(collection(db, this.COLLECTION_NAME), orderBy('createdAt', 'desc'));
       
       const unsubscribe = onSnapshot(q, (querySnapshot) => {
         const tasks = [];

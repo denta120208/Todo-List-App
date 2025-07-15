@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import FirebaseService from './firebaseService';
+import FirebaseService from './firebaseService-mobile';
 
 
 const { width, height } = Dimensions.get('window');
@@ -28,6 +28,7 @@ const SuperCoolTodoApp = () => {
   const [scaleAnim] = useState(new Animated.Value(0.9));
   const [loading, setLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
 
   // Initialize Firebase listener and entrance animation
   useEffect(() => {
@@ -45,7 +46,7 @@ const SuperCoolTodoApp = () => {
       }),
     ]).start();
 
-    // Initialize authentication and Firebase
+    // Initialize Firebase
     initializeApp();
 
     // Cleanup listener on unmount
@@ -56,21 +57,20 @@ const SuperCoolTodoApp = () => {
     };
   }, []);
 
-  // Initialize authentication and set up listeners
+  // Initialize Firebase and set up listeners
   const initializeApp = async () => {
     try {
       setLoading(true);
+      console.log('Starting app initialization...');
       
-      // Initialize Firebase authentication
-      console.log('Initializing authentication...');
-      await FirebaseService.initAuth();
-      console.log('Authentication complete');
-      
+      // Initialize Firebase with mobile optimizations
+      await FirebaseService.initialize();
       setIsAuthenticated(true);
       
       // Set up real-time listener for tasks
       const unsubscribe = FirebaseService.subscribeToTasks((tasksFromFirestore) => {
         setTasks(tasksFromFirestore);
+        setIsOnline(FirebaseService.getOnlineStatus());
         setLoading(false);
       });
       
@@ -82,9 +82,16 @@ const SuperCoolTodoApp = () => {
       
     } catch (error) {
       console.error('Error initializing app:', error);
-      Alert.alert('Error', 'Gagal menginisialisasi aplikasi. Periksa koneksi internet.');
+      
+      let errorMessage = 'Gagal menginisialisasi aplikasi.';
+      if (error.code === 'network-request-failed') {
+        errorMessage = 'Tidak ada koneksi internet. Mode offline diaktifkan.';
+      }
+      
+      Alert.alert('Info', errorMessage);
       setLoading(false);
-      setIsAuthenticated(false);
+      setIsAuthenticated(true); // Allow offline mode
+      setIsOnline(false);
     }
   };
 
@@ -110,13 +117,7 @@ const SuperCoolTodoApp = () => {
       return;
     }
 
-    if (!isAuthenticated) {
-      Alert.alert('Error', 'Menunggu autentikasi. Coba lagi sebentar...');
-      return;
-    }
-
     try {
-      setLoading(true);
       const newTask = {
         text: inputValue.trim(),
         completed: false,
@@ -127,6 +128,9 @@ const SuperCoolTodoApp = () => {
       await FirebaseService.addTask(newTask);
       console.log('Task added successfully');
       setInputValue('');
+      
+      // Update online status
+      setIsOnline(FirebaseService.getOnlineStatus());
       
       // Add animation for new task
       Animated.spring(scaleAnim, {
@@ -142,19 +146,21 @@ const SuperCoolTodoApp = () => {
       });
     } catch (error) {
       console.error('Error adding task:', error);
+      setIsOnline(FirebaseService.getOnlineStatus());
       
-      let errorMessage = 'Gagal menambahkan task';
+      let errorMessage = 'Task disimpan offline';
       if (error.code === 'permission-denied') {
-        errorMessage = 'Izin ditolak. Periksa pengaturan Firebase.';
+        errorMessage = 'Task disimpan offline. Akan disinkronisasi nanti.';
       } else if (error.code === 'unavailable') {
-        errorMessage = 'Layanan tidak tersedia. Periksa koneksi internet.';
-      } else if (error.message) {
-        errorMessage = error.message;
+        errorMessage = 'Task disimpan offline. Periksa koneksi internet.';
+      } else if (error.code === 'network-request-failed') {
+        errorMessage = 'Task disimpan offline. Tidak ada koneksi internet.';
       }
       
-      Alert.alert('Error', errorMessage + '\n\nCoba lagi sebentar.');
-    } finally {
-      setLoading(false);
+      // Don't show error for offline mode - just a success message
+      if (!isOnline) {
+        console.log('Task saved in offline mode');
+      }
     }
   };
 
@@ -279,6 +285,14 @@ const SuperCoolTodoApp = () => {
                 color={darkMode ? '#a855f7' : '#8b5cf6'} 
                 style={styles.sparkleIcon}
               />
+            </View>
+            
+            {/* Status Indicator */}
+            <View style={styles.statusContainer}>
+              <View style={[styles.statusDot, { backgroundColor: isOnline ? '#10b981' : '#ef4444' }]} />
+              <Text style={[styles.statusText, { color: theme.textSecondary }]}>
+                {isOnline ? 'Online' : 'Offline'}
+              </Text>
             </View>
             
             <View style={styles.headerButtons}>
@@ -539,6 +553,21 @@ const styles = StyleSheet.create({
   },
   sparkleIcon: {
     opacity: 0.8,
+  },
+  statusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  statusText: {
+    fontSize: 12,
+    fontWeight: '500',
   },
   headerButtons: {
     flexDirection: 'row',
