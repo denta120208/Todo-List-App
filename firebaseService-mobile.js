@@ -11,10 +11,10 @@ import {
   query, 
   orderBy,
   serverTimestamp,
-  connectFirestoreEmulator,
   enableNetwork,
   disableNetwork
 } from "firebase/firestore";
+import { getAuth, signInAnonymously } from "firebase/auth";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 
@@ -29,29 +29,32 @@ const firebaseConfig = {
   measurementId: "G-ZBH6ZRX4TX"
 };
 
+
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+const auth = getAuth(app);
+
 
 class FirebaseService {
-  // Collection name
-  static COLLECTION_NAME = 'todos';
+  static COLLECTION_NAME = 'users';
   static STORAGE_KEY = 'todos_offline';
   static isOnline = true;
+  static currentUserId = null;
 
-  // Initialize Firebase with platform-specific settings
+  // Initialize Firebase and anonymous auth
   static async initialize() {
     try {
       console.log('Initializing Firebase for platform:', Platform.OS);
-      
-      if (Platform.OS === 'web') {
-        // Web-specific initialization
-        console.log('Web platform detected');
+      if (!auth.currentUser) {
+        const result = await signInAnonymously(auth);
+        this.currentUserId = result.user.uid;
+        console.log('Anonymous user created:', this.currentUserId);
       } else {
-        // Mobile-specific initialization
-        console.log('Mobile platform detected');
-        
-        // Enable offline persistence for mobile
+        this.currentUserId = auth.currentUser.uid;
+        console.log('User already authenticated:', this.currentUserId);
+      }
+      if (Platform.OS !== 'web') {
         try {
           await enableNetwork(db);
           console.log('Network enabled for Firestore');
@@ -59,12 +62,19 @@ class FirebaseService {
           console.log('Network enable error (might be already enabled):', error);
         }
       }
-      
       return true;
     } catch (error) {
       console.error('Firebase initialization error:', error);
       return false;
     }
+  }
+
+  // Get user-specific collection reference
+  static getUserCollection() {
+    if (!this.currentUserId) {
+      throw new Error('User not authenticated');
+    }
+    return collection(db, this.COLLECTION_NAME, this.currentUserId, 'todos');
   }
 
   // Save to local storage (offline fallback)
@@ -96,35 +106,29 @@ class FirebaseService {
   static async addTask(task) {
     const taskWithTimestamp = {
       ...task,
-      id: Date.now().toString(), // Generate local ID
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
-
     try {
-      console.log('Adding task to Firestore...');
-      
-      // Try to add to Firestore first
-      const docRef = await addDoc(collection(db, this.COLLECTION_NAME), {
+      if (!this.currentUserId) {
+        await this.initialize();
+      }
+      const docRef = await addDoc(this.getUserCollection(), {
         ...taskWithTimestamp,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
-      
       console.log('Task added to Firestore with ID:', docRef.id);
       this.isOnline = true;
       return docRef.id;
-      
     } catch (error) {
       console.error('Firestore add error:', error);
       this.isOnline = false;
-      
       // Fallback to local storage
       console.log('Falling back to local storage...');
       const localTasks = await this.loadFromLocal();
-      localTasks.unshift(taskWithTimestamp);
+      localTasks.unshift({ ...taskWithTimestamp, id: Date.now().toString() });
       await this.saveToLocal(localTasks);
-      
       console.log('Task added to local storage');
       return taskWithTimestamp.id;
     }
@@ -133,31 +137,25 @@ class FirebaseService {
   // Get all tasks
   static async getTasks() {
     try {
-      console.log('Getting tasks from Firestore...');
-      
-      const q = query(collection(db, this.COLLECTION_NAME), orderBy('createdAt', 'desc'));
+      if (!this.currentUserId) {
+        await this.initialize();
+      }
+      const q = query(this.getUserCollection(), orderBy('createdAt', 'desc'));
       const querySnapshot = await getDocs(q);
       const tasks = [];
-      
       querySnapshot.forEach((doc) => {
         tasks.push({
           id: doc.id,
           ...doc.data()
         });
       });
-      
       console.log('Tasks loaded from Firestore:', tasks.length);
       this.isOnline = true;
-      
-      // Save to local storage as backup
       await this.saveToLocal(tasks);
-      
       return tasks;
-      
     } catch (error) {
       console.error('Firestore get error:', error);
       this.isOnline = false;
-      
       // Fallback to local storage
       console.log('Loading from local storage...');
       const localTasks = await this.loadFromLocal();
@@ -168,7 +166,10 @@ class FirebaseService {
   // Toggle task completion
   static async toggleTask(taskId, currentStatus) {
     try {
-      const taskRef = doc(db, this.COLLECTION_NAME, taskId);
+      if (!this.currentUserId) {
+        await this.initialize();
+      }
+      const taskRef = doc(this.getUserCollection(), taskId);
       await updateDoc(taskRef, {
         completed: !currentStatus,
         updatedAt: serverTimestamp()
@@ -178,7 +179,6 @@ class FirebaseService {
     } catch (error) {
       console.error('Error toggling task in Firestore:', error);
       this.isOnline = false;
-      
       // Update local storage
       const localTasks = await this.loadFromLocal();
       const taskIndex = localTasks.findIndex(task => task.id === taskId);
@@ -194,13 +194,15 @@ class FirebaseService {
   // Delete a task
   static async deleteTask(taskId) {
     try {
-      await deleteDoc(doc(db, this.COLLECTION_NAME, taskId));
+      if (!this.currentUserId) {
+        await this.initialize();
+      }
+      await deleteDoc(doc(this.getUserCollection(), taskId));
       console.log('Task deleted from Firestore:', taskId);
       this.isOnline = true;
     } catch (error) {
       console.error('Error deleting task from Firestore:', error);
       this.isOnline = false;
-      
       // Delete from local storage
       const localTasks = await this.loadFromLocal();
       const filteredTasks = localTasks.filter(task => task.id !== taskId);
@@ -212,7 +214,10 @@ class FirebaseService {
   // Set task priority
   static async setPriority(taskId, priority) {
     try {
-      const taskRef = doc(db, this.COLLECTION_NAME, taskId);
+      if (!this.currentUserId) {
+        await this.initialize();
+      }
+      const taskRef = doc(this.getUserCollection(), taskId);
       await updateDoc(taskRef, {
         priority: priority,
         updatedAt: serverTimestamp()
@@ -222,7 +227,6 @@ class FirebaseService {
     } catch (error) {
       console.error('Error setting priority in Firestore:', error);
       this.isOnline = false;
-      
       // Update local storage
       const localTasks = await this.loadFromLocal();
       const taskIndex = localTasks.findIndex(task => task.id === taskId);
@@ -238,39 +242,17 @@ class FirebaseService {
   // Subscribe to real-time task updates
   static subscribeToTasks(callback) {
     try {
-      const q = query(collection(db, this.COLLECTION_NAME), orderBy('createdAt', 'desc'));
-      
-      const unsubscribe = onSnapshot(q, (querySnapshot) => {
-        const tasks = [];
-        querySnapshot.forEach((doc) => {
-          tasks.push({
-            id: doc.id,
-            ...doc.data()
-          });
+      if (!this.currentUserId) {
+        this.initialize().then(() => {
+          this._subscribe(callback);
         });
-        
-        console.log('Real-time update received:', tasks.length);
-        this.isOnline = true;
-        
-        // Save to local storage
-        this.saveToLocal(tasks);
-        
-        callback(tasks);
-      }, (error) => {
-        console.error('Error in real-time listener:', error);
-        this.isOnline = false;
-        
-        // Fallback to local storage
-        this.loadFromLocal().then(localTasks => {
-          callback(localTasks);
-        });
-      });
-
-      return unsubscribe;
+        return () => {};
+      } else {
+        return this._subscribe(callback);
+      }
     } catch (error) {
       console.error('Error setting up real-time listener:', error);
       this.isOnline = false;
-      
       // Return a function that loads from local storage
       return () => {
         this.loadFromLocal().then(localTasks => {
@@ -278,6 +260,30 @@ class FirebaseService {
         });
       };
     }
+  }
+
+  static _subscribe(callback) {
+    const q = query(this.getUserCollection(), orderBy('createdAt', 'desc'));
+    const unsubscribe = onSnapshot(q, (querySnapshot) => {
+      const tasks = [];
+      querySnapshot.forEach((doc) => {
+        tasks.push({
+          id: doc.id,
+          ...doc.data()
+        });
+      });
+      console.log('Real-time update received:', tasks.length);
+      this.isOnline = true;
+      this.saveToLocal(tasks);
+      callback(tasks);
+    }, (error) => {
+      console.error('Error in real-time listener:', error);
+      this.isOnline = false;
+      this.loadFromLocal().then(localTasks => {
+        callback(localTasks);
+      });
+    });
+    return unsubscribe;
   }
 
   // Check online status

@@ -67,23 +67,22 @@ const SuperCoolTodoApp = () => {
       await FirebaseService.initialize();
       setIsAuthenticated(true);
       
-      // Set up real-time listener for tasks
-      const unsubscribe = FirebaseService.subscribeToTasks((tasksFromFirestore) => {
-        // Only update if tasks are different to avoid overriding local state
-        setTasks(prevTasks => {
-          const tasksChanged = JSON.stringify(prevTasks) !== JSON.stringify(tasksFromFirestore);
-          if (tasksChanged) {
-            console.log('Tasks updated from server:', tasksFromFirestore.length);
-            return tasksFromFirestore;
-          }
-          return prevTasks;
+      // Different approach for mobile vs web
+      if (Platform.OS === 'web') {
+        // Web: Use real-time listener
+        const unsubscribe = FirebaseService.subscribeToTasks((tasksFromFirestore) => {
+          setTasks(tasksFromFirestore);
+          setIsOnline(FirebaseService.getOnlineStatus());
+          setLoading(false);
         });
-        setIsOnline(FirebaseService.getOnlineStatus());
-        setLoading(false);
-      });
-      
-      // Store unsubscribe function for cleanup
-      window.unsubscribeTasks = unsubscribe;
+        
+        // Store unsubscribe function for cleanup
+        window.unsubscribeTasks = unsubscribe;
+      } else {
+        // Mobile: Use manual refresh (no real-time listener)
+        console.log('Mobile detected - using manual refresh mode');
+        window.unsubscribeTasks = () => {}; // Empty function for cleanup
+      }
       
       // Load initial tasks
       await loadTasks();
@@ -106,14 +105,23 @@ const SuperCoolTodoApp = () => {
   // Load tasks from Firebase
   const loadTasks = async () => {
     try {
-      setLoading(true);
+      if (Platform.OS !== 'web') {
+        setLoading(true);
+      }
       const tasksFromFirestore = await FirebaseService.getTasks();
       setTasks(tasksFromFirestore);
+      setIsOnline(FirebaseService.getOnlineStatus());
+      console.log('Tasks loaded:', tasksFromFirestore.length);
     } catch (error) {
       console.error('Error loading tasks:', error);
-      Alert.alert('Error', 'Failed to load tasks');
+      setIsOnline(FirebaseService.getOnlineStatus());
+      if (Platform.OS !== 'web') {
+        console.log('Load failed, tasks will be empty or from cache');
+      }
     } finally {
-      setLoading(false);
+      if (Platform.OS !== 'web') {
+        setLoading(false);
+      }
     }
   };
 
@@ -139,6 +147,11 @@ const SuperCoolTodoApp = () => {
       
       // Update online status
       setIsOnline(FirebaseService.getOnlineStatus());
+      
+      // For mobile, manually refresh tasks
+      if (Platform.OS !== 'web') {
+        await loadTasks();
+      }
       
       // Add animation for new task
       Animated.spring(scaleAnim, {
@@ -177,10 +190,6 @@ const SuperCoolTodoApp = () => {
       const task = tasks.find(task => task.id === id);
       if (task) {
         console.log('Toggling task:', id, 'current status:', task.completed);
-        await FirebaseService.toggleTask(id, task.completed);
-        
-        // Update online status
-        setIsOnline(FirebaseService.getOnlineStatus());
         
         // Update local state immediately for better UX
         setTasks(prevTasks => 
@@ -188,17 +197,24 @@ const SuperCoolTodoApp = () => {
             t.id === id ? { ...t, completed: !t.completed } : t
           )
         );
+        
+        // Then update Firebase
+        await FirebaseService.toggleTask(id, task.completed);
+        
+        // Update online status
+        setIsOnline(FirebaseService.getOnlineStatus());
+        
+        // For mobile, refresh tasks to ensure consistency
+        if (Platform.OS !== 'web') {
+          setTimeout(() => loadTasks(), 500);
+        }
       }
     } catch (error) {
       console.error('Error toggling task:', error);
       setIsOnline(FirebaseService.getOnlineStatus());
       
-      // Still update local state even if online update failed
-      setTasks(prevTasks => 
-        prevTasks.map(t => 
-          t.id === id ? { ...t, completed: !t.completed } : t
-        )
-      );
+      // Keep the local state change even if Firebase update failed
+      console.log('Toggle saved locally');
     }
   };
 
@@ -218,20 +234,27 @@ const SuperCoolTodoApp = () => {
             onPress: async () => {
               try {
                 console.log('Deleting task:', id);
+                
+                // Update local state immediately
+                setTasks(prevTasks => prevTasks.filter(t => t.id !== id));
+                
+                // Then update Firebase
                 await FirebaseService.deleteTask(id);
                 
                 // Update online status
                 setIsOnline(FirebaseService.getOnlineStatus());
                 
-                // Update local state immediately
-                setTasks(prevTasks => prevTasks.filter(t => t.id !== id));
+                // For mobile, refresh tasks to ensure consistency
+                if (Platform.OS !== 'web') {
+                  setTimeout(() => loadTasks(), 500);
+                }
                 
               } catch (error) {
                 console.error('Error deleting task:', error);
                 setIsOnline(FirebaseService.getOnlineStatus());
                 
-                // Still update local state even if online delete failed
-                setTasks(prevTasks => prevTasks.filter(t => t.id !== id));
+                // Keep the local state change even if Firebase delete failed
+                console.log('Delete saved locally');
               }
             },
           },
@@ -245,10 +268,6 @@ const SuperCoolTodoApp = () => {
   const setPriority = async (id, priority) => {
     try {
       console.log('Setting priority:', id, priority);
-      await FirebaseService.setPriority(id, priority);
-      
-      // Update online status
-      setIsOnline(FirebaseService.getOnlineStatus());
       
       // Update local state immediately
       setTasks(prevTasks => 
@@ -257,16 +276,23 @@ const SuperCoolTodoApp = () => {
         )
       );
       
+      // Then update Firebase
+      await FirebaseService.setPriority(id, priority);
+      
+      // Update online status
+      setIsOnline(FirebaseService.getOnlineStatus());
+      
+      // For mobile, refresh tasks to ensure consistency
+      if (Platform.OS !== 'web') {
+        setTimeout(() => loadTasks(), 500);
+      }
+      
     } catch (error) {
       console.error('Error setting priority:', error);
       setIsOnline(FirebaseService.getOnlineStatus());
       
-      // Still update local state even if online update failed
-      setTasks(prevTasks => 
-        prevTasks.map(t => 
-          t.id === id ? { ...t, priority: priority } : t
-        )
-      );
+      // Keep the local state change even if Firebase update failed
+      console.log('Priority change saved locally');
     }
   };
 
