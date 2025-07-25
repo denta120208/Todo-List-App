@@ -11,10 +11,14 @@ import {
   StatusBar,
   Platform,
   Alert,
+  Modal,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import FirebaseService from './firebaseService-mobile';
+import NotificationService from './notificationService';
 
 
 const { width, height } = Dimensions.get('window');
@@ -29,6 +33,25 @@ const SuperCoolTodoApp = () => {
   const [loading, setLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
+  
+  // Alarm/Notification states
+  const [showAlarmModal, setShowAlarmModal] = useState(false);
+  const [alarmDate, setAlarmDate] = useState(new Date());
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showTimePicker, setShowTimePicker] = useState(false);
+  const [hasAlarm, setHasAlarm] = useState(false);
+  
+  // Daily reminder states
+  const [showReminderModal, setShowReminderModal] = useState(false);
+  const [reminderTime, setReminderTime] = useState(new Date());
+  const [reminderEnabled, setReminderEnabled] = useState(false);
+  const [reminderSound, setReminderSound] = useState('default');
+  const [showReminderTimePicker, setShowReminderTimePicker] = useState(false);
+  
+  // Task alarm confirmation states
+  const [showTaskAlarmConfirm, setShowTaskAlarmConfirm] = useState(false);
+  const [currentTaskId, setCurrentTaskId] = useState(null);
+  const [currentTaskText, setCurrentTaskText] = useState('');
 
   // Initialize Firebase listener and entrance animation
   useEffect(() => {
@@ -46,14 +69,37 @@ const SuperCoolTodoApp = () => {
       }),
     ]).start();
 
-    // Initialize Firebase
+    // Initialize Firebase and notifications
     initializeApp();
+
+    // Initialize notifications
+    NotificationService.initialize();
+
+    // Load reminder settings
+    loadReminderSettings();
+
+    // Set up notification listeners
+    const removeNotificationListeners = NotificationService.setupListeners(
+      (notification) => {
+        // Handle notification received while app is open
+        console.log('Notification received in app:', notification.request.content.body);
+      },
+      (response) => {
+        // Handle user interaction with notification
+        const taskId = response.notification.request.content.data?.taskId;
+        if (taskId) {
+          console.log('User tapped notification for task:', taskId);
+          // You can add logic here to highlight the task or navigate to it
+        }
+      }
+    );
 
     // Cleanup listener on unmount
     return () => {
       if (window.unsubscribeTasks) {
         window.unsubscribeTasks();
       }
+      removeNotificationListeners();
     };
   }, []);
 
@@ -125,7 +171,44 @@ const SuperCoolTodoApp = () => {
     }
   };
 
+  // Load reminder settings from storage
+  const loadReminderSettings = async () => {
+    try {
+      const settings = await AsyncStorage.getItem('reminder_settings');
+      if (settings) {
+        const { enabled, time, sound } = JSON.parse(settings);
+        setReminderEnabled(enabled);
+        setReminderTime(new Date(time));
+        setReminderSound(sound);
+        
+        // Re-schedule reminder if it was enabled
+        if (enabled) {
+          const timeObj = new Date(time);
+          await NotificationService.scheduleDailyReminder(
+            timeObj.getHours(), 
+            timeObj.getMinutes(), 
+            sound
+          );
+        }
+      }
+    } catch (error) {
+      console.error('Error loading reminder settings:', error);
+    }
+  };
 
+  // Save reminder settings to storage
+  const saveReminderSettings = async (enabled, time, sound) => {
+    try {
+      const settings = {
+        enabled,
+        time: time.toISOString(),
+        sound
+      };
+      await AsyncStorage.setItem('reminder_settings', JSON.stringify(settings));
+    } catch (error) {
+      console.error('Error saving reminder settings:', error);
+    }
+  };
 
   const addTask = async () => {
     if (!inputValue.trim()) {
@@ -138,11 +221,15 @@ const SuperCoolTodoApp = () => {
         text: inputValue.trim(),
         completed: false,
         priority: 'medium',
+        alarmTime: null,
+        notificationId: null,
       };
       
       console.log('Adding task:', newTask);
-      await FirebaseService.addTask(newTask);
+      const taskId = await FirebaseService.addTask(newTask);
+      
       console.log('Task added successfully');
+      const taskText = inputValue.trim();
       setInputValue('');
       
       // Update online status
@@ -165,6 +252,12 @@ const SuperCoolTodoApp = () => {
           useNativeDriver: true,
         }).start();
       });
+      
+      // Show alarm confirmation after task is added
+      setCurrentTaskId(taskId);
+      setCurrentTaskText(taskText);
+      setShowTaskAlarmConfirm(true);
+      
     } catch (error) {
       console.error('Error adding task:', error);
       setIsOnline(FirebaseService.getOnlineStatus());
@@ -234,6 +327,12 @@ const SuperCoolTodoApp = () => {
             onPress: async () => {
               try {
                 console.log('Deleting task:', id);
+                
+                // Cancel notification if exists
+                const task = tasks.find(t => t.id === id);
+                if (task?.notificationId) {
+                  await NotificationService.cancelTaskNotification(task.notificationId);
+                }
                 
                 // Update local state immediately
                 setTasks(prevTasks => prevTasks.filter(t => t.id !== id));
@@ -378,6 +477,20 @@ const SuperCoolTodoApp = () => {
             </View>
             
             <View style={styles.headerButtons}>
+              <TouchableOpacity
+                onPress={() => setShowReminderModal(true)}
+                style={[
+                  styles.reminderButton,
+                  { backgroundColor: reminderEnabled ? theme.accent[0] : theme.border }
+                ]}
+              >
+                <Ionicons 
+                  name="notifications-outline" 
+                  size={20} 
+                  color={reminderEnabled ? '#ffffff' : theme.textSecondary} 
+                />
+              </TouchableOpacity>
+              
               <TouchableOpacity
                 onPress={() => setDarkMode(!darkMode)}
                 style={[
@@ -537,6 +650,14 @@ const SuperCoolTodoApp = () => {
                     ]}>
                       {task.text}
                     </Text>
+                    {task.alarmTime && (
+                      <View style={styles.alarmTimeContainer}>
+                        <Ionicons name="alarm-outline" size={12} color={theme.textSecondary} />
+                        <Text style={[styles.alarmTimeText, { color: theme.textSecondary }]}>
+                          {NotificationService.formatAlarmTime(task.alarmTime)}
+                        </Text>
+                      </View>
+                    )}
                   </View>
 
                   {/* Priority Indicator */}
@@ -603,6 +724,336 @@ const SuperCoolTodoApp = () => {
           )}
         </Animated.View>
       </LinearGradient>
+
+      {/* Alarm Modal */}
+      <Modal
+        visible={showAlarmModal}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setShowAlarmModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: theme.cardBg }]}>
+            <Text style={[styles.modalTitle, { color: theme.text }]}>
+              Set Alarm untuk Task
+            </Text>
+
+            {hasAlarm && (
+              <Text style={[styles.selectedTimeText, { color: theme.textSecondary }]}>
+                Alarm: {NotificationService.formatAlarmTime(alarmDate)}
+              </Text>
+            )}
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                onPress={() => setShowDatePicker(true)}
+                style={[styles.modalButton, { backgroundColor: theme.accent[0] }]}
+              >
+                <Ionicons name="calendar-outline" size={20} color="#ffffff" />
+                <Text style={styles.modalButtonText}>Pilih Tanggal</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => setShowTimePicker(true)}
+                style={[styles.modalButton, { backgroundColor: theme.accent[1] }]}
+              >
+                <Ionicons name="time-outline" size={20} color="#ffffff" />
+                <Text style={styles.modalButtonText}>Pilih Waktu</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                onPress={() => {
+                  setHasAlarm(false);
+                  setShowAlarmModal(false);
+                }}
+                style={[styles.actionButton, { backgroundColor: theme.border }]}
+              >
+                <Text style={[styles.actionButtonText, { color: theme.text }]}>
+                  Hapus Alarm
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={async () => {
+                  if (currentTaskId && NotificationService.isValidAlarmTime(alarmDate)) {
+                    // Schedule notification for existing task
+                    const notificationId = await NotificationService.scheduleTaskNotification(
+                      { id: currentTaskId, text: currentTaskText }, 
+                      alarmDate
+                    );
+                    
+                    if (notificationId) {
+                      // Update task with alarm time and notification ID
+                      await FirebaseService.updateTaskAlarm(currentTaskId, alarmDate.toISOString(), notificationId);
+                      
+                      // Refresh tasks
+                      if (Platform.OS !== 'web') {
+                        await loadTasks();
+                      }
+                      
+                      Alert.alert(
+                        'Alarm Diatur!', 
+                        `Alarm untuk "${currentTaskText}" akan berbunyi pada ${alarmDate.toLocaleDateString('id-ID')} jam ${alarmDate.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}`
+                      );
+                    }
+                  }
+                  
+                  setHasAlarm(false);
+                  setShowAlarmModal(false);
+                  setCurrentTaskId(null);
+                  setCurrentTaskText('');
+                }}
+                style={[styles.actionButton, { backgroundColor: theme.accent[0] }]}
+              >
+                <Text style={styles.actionButtonText}>Set Alarm</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => setShowAlarmModal(false)}
+                style={[styles.actionButton, { backgroundColor: theme.border }]}
+              >
+                <Text style={[styles.actionButtonText, { color: theme.text }]}>
+                  Batal
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+
+        {/* Date Picker */}
+        {showDatePicker && (
+          <DateTimePicker
+            value={alarmDate}
+            mode="date"
+            display="default"
+            onChange={(event, selectedDate) => {
+              setShowDatePicker(false);
+              if (selectedDate) {
+                const newDate = new Date(alarmDate);
+                newDate.setFullYear(selectedDate.getFullYear());
+                newDate.setMonth(selectedDate.getMonth());
+                newDate.setDate(selectedDate.getDate());
+                setAlarmDate(newDate);
+              }
+            }}
+          />
+        )}
+
+        {/* Time Picker */}
+        {showTimePicker && (
+          <DateTimePicker
+            value={alarmDate}
+            mode="time"
+            display="default"
+            onChange={(event, selectedTime) => {
+              setShowTimePicker(false);
+              if (selectedTime) {
+                const newDate = new Date(alarmDate);
+                newDate.setHours(selectedTime.getHours());
+                newDate.setMinutes(selectedTime.getMinutes());
+                setAlarmDate(newDate);
+              }
+            }}
+          />
+        )}
+      </Modal>
+
+      {/* Daily Reminder Modal */}
+      <Modal
+        visible={showReminderModal}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setShowReminderModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: theme.cardBg }]}>
+            <Text style={[styles.modalTitle, { color: theme.text }]}>
+              Daily Reminder
+            </Text>
+            <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>
+              Atur waktu notifikasi harian untuk mengingatkan check todo list
+            </Text>
+
+            {reminderEnabled && (
+              <Text style={[styles.selectedTimeText, { color: theme.textSecondary }]}>
+                Reminder aktif: {reminderTime.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+              </Text>
+            )}
+
+            <View style={styles.modalSection}>
+              <Text style={[styles.sectionTitle, { color: theme.text }]}>Waktu Reminder</Text>
+              <TouchableOpacity
+                onPress={() => setShowReminderTimePicker(true)}
+                style={[styles.timePickerButton, { backgroundColor: theme.accent[0] }]}
+              >
+                <Ionicons name="time-outline" size={20} color="#ffffff" />
+                <Text style={styles.timePickerButtonText}>
+                  {reminderTime.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.modalSection}>
+              <Text style={[styles.sectionTitle, { color: theme.text }]}>Nada Dering</Text>
+              <View style={styles.soundOptions}>
+                {[
+                  { value: 'default', label: 'Default' },
+                  { value: 'bell', label: 'Bell' },
+                  { value: 'chime', label: 'Chime' },
+                  { value: 'alarm', label: 'Alarm' }
+                ].map((sound) => (
+                  <TouchableOpacity
+                    key={sound.value}
+                    onPress={() => setReminderSound(sound.value)}
+                    style={[
+                      styles.soundOption,
+                      {
+                        backgroundColor: reminderSound === sound.value 
+                          ? theme.accent[0] 
+                          : theme.border
+                      }
+                    ]}
+                  >
+                    <Text style={[
+                      styles.soundOptionText,
+                      {
+                        color: reminderSound === sound.value 
+                          ? '#ffffff' 
+                          : theme.text
+                      }
+                    ]}>
+                      {sound.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                onPress={async () => {
+                  if (reminderEnabled) {
+                    await NotificationService.cancelDailyReminder();
+                    setReminderEnabled(false);
+                    await saveReminderSettings(false, reminderTime, reminderSound);
+                  }
+                  setShowReminderModal(false);
+                }}
+                style={[styles.actionButton, { backgroundColor: '#ef4444' }]}
+              >
+                <Text style={styles.actionButtonText}>Matikan</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={async () => {
+                  const hour = reminderTime.getHours();
+                  const minute = reminderTime.getMinutes();
+                  
+                  await NotificationService.scheduleDailyReminder(hour, minute, reminderSound);
+                  setReminderEnabled(true);
+                  await saveReminderSettings(true, reminderTime, reminderSound);
+                  setShowReminderModal(false);
+                  
+                  Alert.alert(
+                    'Reminder Diatur!', 
+                    `Notifikasi harian akan muncul setiap hari jam ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`
+                  );
+                }}
+                style={[styles.actionButton, { backgroundColor: theme.accent[0] }]}
+              >
+                <Text style={styles.actionButtonText}>Aktifkan</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => setShowReminderModal(false)}
+                style={[styles.actionButton, { backgroundColor: theme.border }]}
+              >
+                <Text style={[styles.actionButtonText, { color: theme.text }]}>
+                  Batal
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+
+        {/* Reminder Time Picker */}
+        {showReminderTimePicker && (
+          <DateTimePicker
+            value={reminderTime}
+            mode="time"
+            display="default"
+            onChange={(event, selectedTime) => {
+              setShowReminderTimePicker(false);
+              if (selectedTime) {
+                setReminderTime(selectedTime);
+              }
+            }}
+          />
+        )}
+      </Modal>
+
+      {/* Task Alarm Confirmation Modal */}
+      <Modal
+        visible={showTaskAlarmConfirm}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowTaskAlarmConfirm(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: theme.cardBg }]}>
+            <Ionicons 
+              name="alarm-outline" 
+              size={48} 
+              color={theme.accent[0]} 
+              style={{ marginBottom: 20 }}
+            />
+            
+            <Text style={[styles.modalTitle, { color: theme.text }]}>
+              Set Alarm untuk Task?
+            </Text>
+            
+            <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>
+              "{currentTaskText}"
+            </Text>
+            
+            <Text style={[styles.taskAlarmDescription, { color: theme.textSecondary }]}>
+              Ingin mengatur alarm dengan tanggal dan waktu tertentu untuk task ini?
+            </Text>
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                onPress={() => {
+                  setShowTaskAlarmConfirm(false);
+                  // Reset alarm date to current time + 1 hour
+                  const futureTime = new Date();
+                  futureTime.setHours(futureTime.getHours() + 1);
+                  setAlarmDate(futureTime);
+                  setHasAlarm(true);
+                  setShowAlarmModal(true);
+                }}
+                style={[styles.actionButton, { backgroundColor: theme.accent[0] }]}
+              >
+                <Text style={styles.actionButtonText}>Ya, Set Alarm</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => {
+                  setShowTaskAlarmConfirm(false);
+                  setCurrentTaskId(null);
+                  setCurrentTaskText('');
+                }}
+                style={[styles.actionButton, { backgroundColor: theme.border }]}
+              >
+                <Text style={[styles.actionButtonText, { color: theme.text }]}>
+                  Tidak, Terima Kasih
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -654,6 +1105,18 @@ const styles = StyleSheet.create({
   headerButtons: {
     flexDirection: 'row',
     gap: 10,
+  },
+  reminderButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
   },
   themeToggle: {
     width: 50,
@@ -725,6 +1188,14 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  alarmButton: {
+    width: 50,
+    height: 50,
+    borderRadius: 15,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
   },
   filterContainer: {
     flexDirection: 'row',
@@ -824,6 +1295,136 @@ const styles = StyleSheet.create({
     fontSize: 16,
     marginTop: 10,
     textAlign: 'center',
+  },
+  alarmTimeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  alarmTimeText: {
+    fontSize: 12,
+    marginLeft: 4,
+    fontStyle: 'italic',
+  },
+  // Modal styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    margin: 20,
+    borderRadius: 20,
+    padding: 30,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 5,
+    minWidth: 300,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  selectedTimeText: {
+    fontSize: 16,
+    marginBottom: 20,
+    textAlign: 'center',
+    fontStyle: 'italic',
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    marginBottom: 20,
+    gap: 10,
+  },
+  modalButton: {
+    flexDirection: 'row',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 15,
+    alignItems: 'center',
+    gap: 8,
+  },
+  modalButtonText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: 10,
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+  },
+  actionButton: {
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 15,
+    minWidth: 80,
+    alignItems: 'center',
+  },
+  actionButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#ffffff',
+  },
+  // Reminder modal styles
+  modalSubtitle: {
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 20,
+    lineHeight: 20,
+  },
+  modalSection: {
+    width: '100%',
+    marginBottom: 20,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 10,
+  },
+  timePickerButton: {
+    flexDirection: 'row',
+    paddingHorizontal: 20,
+    paddingVertical: 15,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  timePickerButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  soundOptions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  soundOption: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 12,
+    minWidth: 60,
+    alignItems: 'center',
+  },
+  soundOptionText: {
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  taskAlarmDescription: {
+    fontSize: 14,
+    textAlign: 'center',
+    marginBottom: 25,
+    lineHeight: 20,
+    paddingHorizontal: 10,
   },
 });
 

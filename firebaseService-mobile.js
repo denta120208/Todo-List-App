@@ -37,23 +37,15 @@ const auth = getAuth(app);
 
 
 class FirebaseService {
-  static COLLECTION_NAME = 'users';
+  static COLLECTION_NAME = 'todos';
   static STORAGE_KEY = 'todos_offline';
   static isOnline = true;
-  static currentUserId = null;
 
-  // Initialize Firebase and anonymous auth
+  // Initialize Firebase (simplified for mobile)
   static async initialize() {
     try {
       console.log('Initializing Firebase for platform:', Platform.OS);
-      if (!auth.currentUser) {
-        const result = await signInAnonymously(auth);
-        this.currentUserId = result.user.uid;
-        console.log('Anonymous user created:', this.currentUserId);
-      } else {
-        this.currentUserId = auth.currentUser.uid;
-        console.log('User already authenticated:', this.currentUserId);
-      }
+      
       if (Platform.OS !== 'web') {
         try {
           await enableNetwork(db);
@@ -62,19 +54,12 @@ class FirebaseService {
           console.log('Network enable error (might be already enabled):', error);
         }
       }
+      
       return true;
     } catch (error) {
       console.error('Firebase initialization error:', error);
       return false;
     }
-  }
-
-  // Get user-specific collection reference
-  static getUserCollection() {
-    if (!this.currentUserId) {
-      throw new Error('User not authenticated');
-    }
-    return collection(db, this.COLLECTION_NAME, this.currentUserId, 'todos');
   }
 
   // Save to local storage (offline fallback)
@@ -110,10 +95,7 @@ class FirebaseService {
       updatedAt: new Date().toISOString()
     };
     try {
-      if (!this.currentUserId) {
-        await this.initialize();
-      }
-      const docRef = await addDoc(this.getUserCollection(), {
+      const docRef = await addDoc(collection(db, this.COLLECTION_NAME), {
         ...taskWithTimestamp,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
@@ -137,10 +119,7 @@ class FirebaseService {
   // Get all tasks
   static async getTasks() {
     try {
-      if (!this.currentUserId) {
-        await this.initialize();
-      }
-      const q = query(this.getUserCollection(), orderBy('createdAt', 'desc'));
+      const q = query(collection(db, this.COLLECTION_NAME), orderBy('createdAt', 'desc'));
       const querySnapshot = await getDocs(q);
       const tasks = [];
       querySnapshot.forEach((doc) => {
@@ -166,10 +145,7 @@ class FirebaseService {
   // Toggle task completion
   static async toggleTask(taskId, currentStatus) {
     try {
-      if (!this.currentUserId) {
-        await this.initialize();
-      }
-      const taskRef = doc(this.getUserCollection(), taskId);
+      const taskRef = doc(db, this.COLLECTION_NAME, taskId);
       await updateDoc(taskRef, {
         completed: !currentStatus,
         updatedAt: serverTimestamp()
@@ -194,10 +170,7 @@ class FirebaseService {
   // Delete a task
   static async deleteTask(taskId) {
     try {
-      if (!this.currentUserId) {
-        await this.initialize();
-      }
-      await deleteDoc(doc(this.getUserCollection(), taskId));
+      await deleteDoc(doc(db, this.COLLECTION_NAME, taskId));
       console.log('Task deleted from Firestore:', taskId);
       this.isOnline = true;
     } catch (error) {
@@ -214,10 +187,7 @@ class FirebaseService {
   // Set task priority
   static async setPriority(taskId, priority) {
     try {
-      if (!this.currentUserId) {
-        await this.initialize();
-      }
-      const taskRef = doc(this.getUserCollection(), taskId);
+      const taskRef = doc(db, this.COLLECTION_NAME, taskId);
       await updateDoc(taskRef, {
         priority: priority,
         updatedAt: serverTimestamp()
@@ -239,17 +209,84 @@ class FirebaseService {
     }
   }
 
+  // Update task notification ID
+  static async updateTaskNotification(taskId, notificationId) {
+    try {
+      const taskRef = doc(db, this.COLLECTION_NAME, taskId);
+      await updateDoc(taskRef, {
+        notificationId: notificationId,
+        updatedAt: serverTimestamp()
+      });
+      console.log('Task notification ID updated:', taskId, notificationId);
+      this.isOnline = true;
+    } catch (error) {
+      console.error('Error updating notification ID:', error);
+      this.isOnline = false;
+      
+      // Update local storage
+      const localTasks = await this.loadFromLocal();
+      const taskIndex = localTasks.findIndex(task => task.id === taskId);
+      if (taskIndex !== -1) {
+        localTasks[taskIndex].notificationId = notificationId;
+        localTasks[taskIndex].updatedAt = new Date().toISOString();
+        await this.saveToLocal(localTasks);
+        console.log('Task notification ID updated in local storage');
+      }
+    }
+  }
+
+  // Update task alarm time
+  static async updateTaskAlarm(taskId, alarmTime, notificationId = null) {
+    try {
+      const taskRef = doc(db, this.COLLECTION_NAME, taskId);
+      await updateDoc(taskRef, {
+        alarmTime: alarmTime,
+        notificationId: notificationId,
+        updatedAt: serverTimestamp()
+      });
+      console.log('Task alarm updated:', taskId, alarmTime);
+      this.isOnline = true;
+    } catch (error) {
+      console.error('Error updating alarm:', error);
+      this.isOnline = false;
+      
+      // Update local storage
+      const localTasks = await this.loadFromLocal();
+      const taskIndex = localTasks.findIndex(task => task.id === taskId);
+      if (taskIndex !== -1) {
+        localTasks[taskIndex].alarmTime = alarmTime;
+        localTasks[taskIndex].notificationId = notificationId;
+        localTasks[taskIndex].updatedAt = new Date().toISOString();
+        await this.saveToLocal(localTasks);
+        console.log('Task alarm updated in local storage');
+      }
+    }
+  }
+
   // Subscribe to real-time task updates
   static subscribeToTasks(callback) {
     try {
-      if (!this.currentUserId) {
-        this.initialize().then(() => {
-          this._subscribe(callback);
+      const q = query(collection(db, this.COLLECTION_NAME), orderBy('createdAt', 'desc'));
+      const unsubscribe = onSnapshot(q, (querySnapshot) => {
+        const tasks = [];
+        querySnapshot.forEach((doc) => {
+          tasks.push({
+            id: doc.id,
+            ...doc.data()
+          });
         });
-        return () => {};
-      } else {
-        return this._subscribe(callback);
-      }
+        console.log('Real-time update received:', tasks.length);
+        this.isOnline = true;
+        this.saveToLocal(tasks);
+        callback(tasks);
+      }, (error) => {
+        console.error('Error in real-time listener:', error);
+        this.isOnline = false;
+        this.loadFromLocal().then(localTasks => {
+          callback(localTasks);
+        });
+      });
+      return unsubscribe;
     } catch (error) {
       console.error('Error setting up real-time listener:', error);
       this.isOnline = false;
@@ -260,30 +297,6 @@ class FirebaseService {
         });
       };
     }
-  }
-
-  static _subscribe(callback) {
-    const q = query(this.getUserCollection(), orderBy('createdAt', 'desc'));
-    const unsubscribe = onSnapshot(q, (querySnapshot) => {
-      const tasks = [];
-      querySnapshot.forEach((doc) => {
-        tasks.push({
-          id: doc.id,
-          ...doc.data()
-        });
-      });
-      console.log('Real-time update received:', tasks.length);
-      this.isOnline = true;
-      this.saveToLocal(tasks);
-      callback(tasks);
-    }, (error) => {
-      console.error('Error in real-time listener:', error);
-      this.isOnline = false;
-      this.loadFromLocal().then(localTasks => {
-        callback(localTasks);
-      });
-    });
-    return unsubscribe;
   }
 
   // Check online status
